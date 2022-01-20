@@ -2,6 +2,9 @@
 
 This file documents all notable changes in `LogDNA CloudWatch Lambda Function`. The release numbering uses [semantic versioning](http://semver.org).
 
+## v2.3.0 - Cloud Trail dev
+* Adding Cloud Trail log access
+
 ## v2.2.1 - Released on August 21, 2020
 * Set hostname to `meta.log.group` if `raw_event` is enabled
 

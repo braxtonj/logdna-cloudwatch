@@ -32,10 +32,6 @@ const getConfig = () => {
         , UserAgent: `${pkg.name}/${pkg.version}`
     };
 
-    config.cloudtrail = process.env.LOGDNA_CLOUDTRAIL ? true : false;
-    if (config.cloudtrail) {
-        config.UserAgent = `logdna-cloudtrail/${pkg.version}`;
-    }
     if (process.env.LOGDNA_KEY) config.key = process.env.LOGDNA_KEY;
     if (process.env.LOGDNA_HOSTNAME) config.hostname = process.env.LOGDNA_HOSTNAME;
     if (process.env.LOGDNA_TAGS && process.env.LOGDNA_TAGS.length > 0) {
@@ -49,11 +45,26 @@ const getConfig = () => {
         config.log_raw_event = config.log_raw_event === 'yes' || config.log_raw_event === 'true';
     }
 
+    // Switch to log CloudTrail instead (in lieu of CloudWatch for POC)
+    config.cloudtrail = process.env.LOGDNA_CLOUDTRAIL ? true : false;
+    if (config.cloudtrail) {
+        config.UserAgent = `logdna-cloudtrail/${pkg.version}`;
+    }
+
+    console.log('config');
+    console.log(config.cloudtrail);
+    console.log(!config.cloudtrail);
+
     return config;
 };
 
 // Parse the GZipped Log Data
-const parseEvent = async (event) => {
+const parseEvent = (event) => {
+    return JSON.parse(zlib.unzipSync(Buffer.from(event.awslogs.data, 'base64')));
+}
+
+// Grab new data from CloudTrail using the Alert event (set up via S3 notification->lambda)
+const grabCloudTrail = async (event) => {
     console.log('parseEvent');
     console.log(event.Records[0]);
 
@@ -75,6 +86,39 @@ const parseEvent = async (event) => {
 
 // Prepare the Messages and Options
 const prepareLogs = (eventData, log_raw_event) => {
+    return eventData.logEvents.map((event) => {
+        const eventMetadata = {
+            event: {
+                type: eventData.messageType
+                , id: event.id
+            }, log: {
+                group: eventData.logGroup
+                , stream: eventData.logStream
+            }
+        };
+
+        const eventLog = {
+            timestamp: event.timestamp
+            , file: eventData.logStream
+            , meta: {
+                owner: eventData.owner
+                , filters: eventData.subscriptionFilters
+            }, line: JSON.stringify(Object.assign({}, {
+                message: event.message
+            }, eventMetadata))
+        };
+
+        if (log_raw_event) {
+            eventLog.line = event.message;
+            eventLog.meta = Object.assign({}, eventLog.meta, eventMetadata);
+        }
+
+        return eventLog;
+    });
+};
+
+// Does nothing right now
+const prepareCloudTrailLogs = (eventData, log_raw_event) => {
     console.log('prepareLogs');
     console.log(util.inspect(eventData,{depth:null}));
     return eventData.Records.map((event) => {
@@ -162,6 +206,8 @@ const sendLine = async (payload, config, callback) => {
             console.log(util.inspect(error,{depth:null}));
             return callback(error);
         }
+        console.log("http call result");
+        console.log(util.inspect(result,{depth:null}));
         return callback(null, result);
     });
 };
@@ -169,13 +215,20 @@ const sendLine = async (payload, config, callback) => {
 // Main Handler
 const handler = async (event, context, callback) => {
     const config = getConfig();
-    const rawData = await parseEvent(event);
-    const preparedData = prepareLogs(rawData, config.log_raw_event);
-    let rslts = preparedData.map( (d) => {
-        return sendLine(d, config, callback);
-    });
 
-    return await rslts;
+    if (!config.cloudtrail) {
+        return sendLine(prepareLogs(parseEvent(event), config.log_raw_event), config, callback);
+    } else {
+        const rawData = await grabCloudTrail(event);
+        const preparedData = prepareCloudTrailLogs(rawData, config.log_raw_event);
+
+        let rslts = preparedData.map(async (d) => {
+            let rslt = await sendLine(d, config, callback);
+            return rslt;
+        });
+
+        return await rslts;
+    }
 };
 
 module.exports = {
